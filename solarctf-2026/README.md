@@ -11,7 +11,4 @@
 
 ## Чек-лист до 17 октября
 - [ ] Запустить setup-windows.ps1
-- [ ] Burp: открыть, проверить встроенный браузер
 - [ ] Зарегистрировать команду на solarctf.ru
-- [ ] Пройти главы web и crypto на course.ugractf.ru
-- [ ] Решить по 5–10 лабораторий PortSwigger Academy (SQLi, XSS, path traversal)
