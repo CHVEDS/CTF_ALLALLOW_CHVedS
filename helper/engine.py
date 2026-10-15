@@ -198,13 +198,39 @@ def iter_strings(b, minlen=4):
         yield m.group().replace(b"\x00", b"")
 
 CHUNK_RES = [
-    re.compile(rb"[A-Za-z0-9+/=_\-]{12,}"),        # base64/url-safe/hex общий
-    re.compile(rb"[A-Za-z0-9+/]{16,}={0,2}"),      # чистый base64-токен без ведущего key=
-    re.compile(rb"[0-9a-fA-F]{16,}"),              # hex
-    re.compile(rb"[!-~]{20,}"),                     # url/base85 плотный печатный кусок
+    re.compile(rb"[A-Za-z0-9+/=_\-]{12,}"),            # base64/url-safe/hex общий
+    re.compile(rb"[A-Za-z0-9+/]{16,}={0,2}"),          # чистый base64-токен без ведущего key=
+    re.compile(rb"[0-9a-fA-F]{16,}"),                  # hex
+    re.compile(rb"[A-Za-z0-9!#$%&()*+;<=>?@^_`{|}~.,/\-]{20,}"),  # base85 плотный кусок
+    re.compile(rb"(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9+/=_~.\-]){16,}"), # url-encoded блоб (с %XX)
 ]
 
-def hunt_bytes(b, src, hits):
+# архивы, в которые заходим и сканируем каждый файл
+def iter_archive(b):
+    """вернуть [(имя_внутри, данные)] для zip/tar; пусто если не архив"""
+    out = []
+    try:
+        import zipfile
+        if b[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
+            with zipfile.ZipFile(io.BytesIO(b)) as z:
+                for n in z.namelist()[:200]:
+                    try: out.append((n, z.read(n)))
+                    except Exception: pass
+            return out
+    except Exception: pass
+    try:
+        import tarfile
+        with tarfile.open(fileobj=io.BytesIO(b)) as t:
+            for m in t.getmembers()[:200]:
+                if m.isfile():
+                    try: out.append((m.name, t.extractfile(m).read()))
+                    except Exception: pass
+        return out
+    except Exception: pass
+    return out
+
+def hunt_bytes(b, src, hits, _depth=0):
+    if _depth > 4: return
     # 1) прямой флаг (в т.ч. UTF-16)
     for s in iter_strings(b, 5):
         fl = flag_in(s)
@@ -214,11 +240,25 @@ def hunt_bytes(b, src, hits):
     for rx in CHUNK_RES:
         for m in rx.finditer(b):
             chunk = m.group()
-            if len(chunk) > 6000 or chunk in seen: continue
-            seen.add(chunk)
-            found, _ = magic(chunk, depth=3)
-            for recipe, fl, _ in found[:1]:
-                hits.append((src, "блоб", recipe, fl))
+            if len(chunk) < 12 or len(chunk) > 8000: continue
+            # кандидаты: весь кусок и часть после ведущего "key=" (param=VALUE)
+            cands = [chunk]
+            if b"=" in chunk[:10]:
+                tail = chunk.split(b"=", 1)[1]
+                if len(tail) >= 12: cands.append(tail)
+            for c in cands:
+                if c in seen: continue
+                seen.add(c)
+                found, _ = magic(c, depth=4)
+                for recipe, fl, _ in found[:1]:
+                    hits.append((src, "блоб", recipe, fl))
+    # 3) распаковка: gzip/zlib целиком и заход внутрь архивов (zip/tar)
+    if _depth < 3:
+        z = t_zlib(b) or t_gzip_safe(b)
+        if z and z != b: hunt_bytes(z, src + " ▸ unzip", hits, _depth + 1)
+        for name, data in iter_archive(b):
+            if data and data != b:
+                hunt_bytes(data, src + " ▸ " + name, hits, _depth + 1)
 
 
 def t_gzip_safe(b):
@@ -353,9 +393,7 @@ def cmd_hunt(path):
         except Exception:
             continue
         rel = os.path.relpath(f, base)
-        hunt_bytes(b, rel, hits)
-        z = t_zlib(b) or t_gzip_safe(b)
-        if z: hunt_bytes(z, rel + " (unzip)", hits)
+        hunt_bytes(b, rel, hits)   # распаковка архивов/gzip — внутри hunt_bytes
     uniq = list(dict.fromkeys(hits))
     out({"files": len(files), "hits": [
         {"src": s, "kind": k, "recipe": r.split(" > ") if r and r != "как есть" else [], "flag": fl}
