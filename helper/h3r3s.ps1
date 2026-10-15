@@ -686,14 +686,23 @@ $script:Engine = Join-Path $PSScriptRoot 'engine.py'
 $script:Py = $null
 
 function Find-Python {
-    if (Get-Command py -ErrorAction SilentlyContinue) { return 'py' }
-    foreach ($name in @('python', 'python3')) {
-        foreach ($c in @(Get-Command $name -All -ErrorAction SilentlyContinue)) {
-            if ($c.Source -and $c.Source -notmatch 'WindowsApps') { return $c.Source }
-        }
+    # Спрашиваем у самого Python путь к настоящему python.exe (sys.executable).
+    # Так обходим ярлыки-псевдонимы из WindowsApps (Python Install Manager, Microsoft Store),
+    # которые не запускаются в фоне с перехватом вывода.
+    foreach ($cand in @('py', 'python', 'python3')) {
+        if (-not (Get-Command $cand -ErrorAction SilentlyContinue)) { continue }
+        try {
+            $exe = & $cand -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1
+            if ($exe) {
+                $exe = ([string]$exe).Trim()
+                if ($exe -and $exe -notmatch 'WindowsApps' -and (Test-Path -LiteralPath $exe)) { return $exe }
+            }
+        } catch {}
     }
-    foreach ($root in @("$env:LocalAppData\Programs\Python", "$env:ProgramFiles")) {
-        $hit = Get-ChildItem -Path $root -Filter python.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    # запасной вариант: ищем python.exe в типичных папках установки
+    foreach ($root in @("$env:LocalAppData\Python", "$env:LocalAppData\Programs\Python", "$env:ProgramFiles\Python*", "C:\Python*")) {
+        $hit = Get-ChildItem -Path $root -Filter python.exe -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch 'WindowsApps|\\venv|\\Scripts\\' } | Select-Object -First 1
         if ($hit) { return $hit.FullName }
     }
     return $null
