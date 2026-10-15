@@ -762,17 +762,47 @@ function Clean-Path([string]$p) {
 # ═══════════════════════════════════════════════════════════════════════
 #  МОДУЛИ
 # ═══════════════════════════════════════════════════════════════════════
+function Hint([string[]]$Lines) {
+    Write-Host '  ┌─ как пользоваться ' -NoNewline -ForegroundColor DarkGray
+    Write-Host ('─' * 34) -ForegroundColor DarkGray
+    foreach ($l in $Lines) {
+        Write-Host '  │ ' -NoNewline -ForegroundColor DarkGray
+        Write-Host $l -ForegroundColor Gray
+    }
+    Write-Host '  │ ' -NoNewline -ForegroundColor DarkGray
+    Write-Host 'пустой Enter' -NoNewline -ForegroundColor Green
+    Write-Host ' — выйти в меню' -ForegroundColor Gray
+    Write-Host ('  └' + ('─' * 53)) -ForegroundColor DarkGray
+}
+
 function Module-Decode {
     Section 'МАГИЧЕСКИЙ ДЕКОДЕР'
-    Say (Pick @('вставь строку — разберу слои сам.', 'кидай шифровку. посмотрим, сколько там слоёв.', 'давай сюда. base64, hex, xor — без разницы.'))
-    Write-Host '  пустой Enter — назад в меню' -ForegroundColor DarkGray
+    Hint @(
+        'вставь закодированную строку (Ctrl+V или правый клик мышью)',
+        'или перетащи файл мышкой в окно — расшифрую его содержимое',
+        'слои (base64, hex, url, xor...) снимаю сам, флаг — в буфер обмена'
+    )
+    Say (Pick @('кидай шифровку. посмотрим, сколько там слоёв.', 'давай сюда. base64, hex, xor — без разницы.', 'жду строку или файл.'))
     while ($true) {
         $s = Prompt-Line 'decode'
-        if ([string]::IsNullOrWhiteSpace($s)) { return }
-        $tmp = [IO.Path]::GetTempFileName()
-        [IO.File]::WriteAllText($tmp, $s, (New-Object Text.UTF8Encoding $false))
-        $r = Invoke-Engine @('decode', $tmp) 'разворачиваю слои'
-        Remove-Item $tmp -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($s)) { Say 'выхожу в меню.'; return }
+        $asPath = Clean-Path $s
+        $tmp = $null
+        if ((Test-Path -LiteralPath $asPath -PathType Leaf -ErrorAction SilentlyContinue)) {
+            $len = (Get-Item -LiteralPath $asPath).Length
+            if ($len -gt 2MB) {
+                Boot-Line ("файл большой ({0:N0} байт) — для него лучше модуль 2 «Охотник»" -f $len) 'WARN'
+                continue
+            }
+            Boot-Line ("беру содержимое файла: {0} ({1:N0} байт)" -f (Split-Path $asPath -Leaf), $len) 'OK'
+            $srcFile = $asPath
+        } else {
+            $tmp = [IO.Path]::GetTempFileName()
+            [IO.File]::WriteAllText($tmp, $s, (New-Object Text.UTF8Encoding $false))
+            $srcFile = $tmp
+        }
+        $r = Invoke-Engine @('decode', $srcFile) 'разворачиваю слои'
+        if ($tmp) { Remove-Item $tmp -ErrorAction SilentlyContinue }
         if ($r.error) { Boot-Line $r.error 'FAIL'; continue }
         $found = @($r.found)
         if ($found.Count -gt 0) {
@@ -783,87 +813,106 @@ function Module-Decode {
                 Write-Host $f.flag -NoNewline -ForegroundColor White
                 Write-Host ('  [' + (@($f.recipe) -join ' > ') + ']') -ForegroundColor DarkGray
             }
-            Say (Pick @('слои сняты. забирай.', 'есть. следующий.', 'чистая работа.'))
+            Say (Pick @('слои сняты. забирай. давай следующую.', 'есть. кидай следующую.', 'чистая работа. ещё?'))
         } elseif (@($r.readable).Count -gt 0) {
             if ($script:SndOn -and $script:LowBytes) { Play-Bytes $script:LowBytes }
+            Write-Host ''
+            Write-Host '  флага нет, но вот что удалось раскодировать:' -ForegroundColor Yellow
+            $n = 0
             foreach ($o in @($r.readable)) {
-                Write-Host ('  ' + (@($o.recipe) -join ' ▸ ')) -ForegroundColor Cyan
-                Write-Host '    ' -NoNewline
+                $n++
+                Write-Host ("  {0}) " -f $n) -NoNewline -ForegroundColor DarkGray
+                Write-Host (@($o.recipe) -join ' ▸ ') -ForegroundColor Cyan
+                Write-Host '     ' -NoNewline
                 Reveal-Text ([string]$o.text) 'White'
                 Write-Host ''
             }
-            Say 'флага не видно, но вот что раскодировалось. возможно, нужен ещё слой — вставь результат снова.'
+            Say 'если это снова похоже на шифровку — скопируй результат и вставь ещё раз.'
         } else {
             if ($script:SndOn -and $script:LowBytes) { Play-Bytes $script:LowBytes }
-            Say 'не поддалось. проверь строку целиком или тащи в CyberChef.'
+            Say 'не поддалось. проверь, что строка вставилась целиком, или попробуй в CyberChef.'
         }
     }
 }
 
 function Module-Hunt {
     Section 'ОХОТНИК ЗА ФЛАГОМ'
-    Say 'дай файл или папку — прочешу всё, включая UTF-16 и закодированные куски.'
-    Write-Host '  можно просто перетащить файл/папку мышкой в это окно и нажать Enter' -ForegroundColor DarkGray
-    $path = Clean-Path (Prompt-Line 'путь')
-    if (-not $path) { return }
-    if (-not (Test-Path -LiteralPath $path)) { Boot-Line "не нашёл: $path" 'FAIL'; return }
-    $r = Invoke-Engine @('hunt', $path) 'прочёсываю файлы' 1500
-    if ($r.error) { Boot-Line $r.error 'FAIL'; return }
-    Boot-Line ("просмотрено файлов: {0}" -f $r.files) 'OK'
-    $hits = @($r.hits)
-    if ($hits.Count -eq 0) {
-        if ($script:SndOn -and $script:LowBytes) { Play-Bytes $script:LowBytes }
-        Say 'ни в открытом, ни в закодированном виде флага нет. подозрительный файл — в модуль 3.'
-        return
-    }
-    Write-Host ''
-    foreach ($h in $hits | Select-Object -First 25) {
-        Write-Host '  [' -NoNewline -ForegroundColor DarkGray
-        Write-Host 'FLAG' -NoNewline -ForegroundColor Red
-        Write-Host '] ' -NoNewline -ForegroundColor DarkGray
-        Reveal-Text ([string]$h.flag) 'White'
+    Hint @(
+        'перетащи мышкой файл или целую папку в окно и нажми Enter',
+        'прочешу всё: текст, UTF-16, закодированные куски, архивы zip/gz',
+        'найденный флаг сразу окажется в буфере обмена'
+    )
+    Say 'неси улики. проверю каждую.'
+    while ($true) {
+        $path = Clean-Path (Prompt-Line 'путь')
+        if (-not $path) { Say 'выхожу в меню.'; return }
+        if (-not (Test-Path -LiteralPath $path)) { Boot-Line "не нашёл: $path" 'FAIL'; continue }
+        $r = Invoke-Engine @('hunt', $path) 'прочёсываю файлы' 1500
+        if ($r.error) { Boot-Line $r.error 'FAIL'; continue }
+        Boot-Line ("просмотрено файлов: {0}" -f $r.files) 'OK'
+        $hits = @($r.hits)
+        if ($hits.Count -eq 0) {
+            if ($script:SndOn -and $script:LowBytes) { Play-Bytes $script:LowBytes }
+            Say 'флага нет ни в открытом, ни в закодированном виде. подозрительный файл — в модуль 3. давай следующий путь.'
+            continue
+        }
         Write-Host ''
-        $rec = if (@($h.recipe).Count) { '  [' + (@($h.recipe) -join ' > ') + ']' } else { '  [в открытом виде]' }
-        Write-Host ('         ' + $h.src + $rec) -ForegroundColor DarkGray
+        foreach ($h in $hits | Select-Object -First 25) {
+            Write-Host '  [' -NoNewline -ForegroundColor DarkGray
+            Write-Host 'FLAG' -NoNewline -ForegroundColor Red
+            Write-Host '] ' -NoNewline -ForegroundColor DarkGray
+            Reveal-Text ([string]$h.flag) 'White'
+            Write-Host ''
+            $rec = if (@($h.recipe).Count) { '  [' + (@($h.recipe) -join ' > ') + ']' } else { '  [в открытом виде]' }
+            Write-Host ('         ' + $h.src + $rec) -ForegroundColor DarkGray
+        }
+        $uniq = @($hits | ForEach-Object { $_.flag } | Select-Object -Unique)
+        Flag-Box $uniq[0]
+        if ($uniq.Count -gt 1) { Say ("разных флагов: {0}. в буфере первый, остальные — в списке выше." -f $uniq.Count) }
+        Say 'следующий путь — или пустой Enter, чтобы выйти.'
     }
-    $uniq = @($hits | ForEach-Object { $_.flag } | Select-Object -Unique)
-    Flag-Box $uniq[0]
-    if ($uniq.Count -gt 1) { Say ("разных флагов: {0}. в буфере первый, остальные — в списке выше." -f $uniq.Count) }
 }
 
 function Module-File {
     Section 'ЧТО ЭТО ЗА ФАЙЛ'
-    Write-Host '  можно перетащить файл мышкой в окно' -ForegroundColor DarkGray
-    $path = Clean-Path (Prompt-Line 'файл')
-    if (-not $path) { return }
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Boot-Line "это не файл: $path" 'FAIL'; return }
-    $r = Invoke-Engine @('file', $path) 'вскрываю файл'
-    if ($r.error) { Boot-Line $r.error 'FAIL'; return }
-    Write-Host ''
-    Write-Host '  тип       ' -NoNewline -ForegroundColor DarkGray; Write-Host $r.type -ForegroundColor White
-    Write-Host '  размер    ' -NoNewline -ForegroundColor DarkGray; Write-Host ("{0:N0} байт" -f [long]$r.size) -ForegroundColor White
-    Write-Host '  энтропия  ' -NoNewline -ForegroundColor DarkGray; Entropy-Bar ([double]$r.entropy)
-    if ([double]$r.entropy -gt 7.2) { Boot-Line 'энтропия высокая — данные сжаты или зашифрованы' 'WARN' }
-    if ($r.ext_mismatch) { Boot-Line ("расширение {0} не совпадает с содержимым — файл замаскирован" -f $r.ext_mismatch) 'WARN' }
-    $emb = @($r.embedded)
-    if ($emb.Count) {
+    Hint @(
+        'перетащи файл мышкой в окно и нажми Enter',
+        'скажу, что это на самом деле, даже если расширение врёт',
+        'покажу энтропию, вложенные файлы и строки'
+    )
+    while ($true) {
+        $path = Clean-Path (Prompt-Line 'файл')
+        if (-not $path) { Say 'выхожу в меню.'; return }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Boot-Line "это не файл: $path" 'FAIL'; continue }
+        $r = Invoke-Engine @('file', $path) 'вскрываю файл'
+        if ($r.error) { Boot-Line $r.error 'FAIL'; continue }
         Write-Host ''
-        Write-Host '  вложенные файлы:' -ForegroundColor Yellow
-        foreach ($e in $emb) {
-            Write-Host ('    0x{0:x8}  ' -f [long]$e.offset) -NoNewline -ForegroundColor DarkGray
-            Write-Host $e.name -ForegroundColor Yellow
+        Write-Host '  тип       ' -NoNewline -ForegroundColor DarkGray; Write-Host $r.type -ForegroundColor White
+        Write-Host '  размер    ' -NoNewline -ForegroundColor DarkGray; Write-Host ("{0:N0} байт" -f [long]$r.size) -ForegroundColor White
+        Write-Host '  энтропия  ' -NoNewline -ForegroundColor DarkGray; Entropy-Bar ([double]$r.entropy)
+        if ([double]$r.entropy -gt 7.2) { Boot-Line 'энтропия высокая — данные сжаты или зашифрованы' 'WARN' }
+        if ($r.ext_mismatch) { Boot-Line ("расширение {0} не совпадает с содержимым — файл замаскирован" -f $r.ext_mismatch) 'WARN' }
+        $emb = @($r.embedded)
+        if ($emb.Count) {
+            Write-Host ''
+            Write-Host '  вложенные файлы:' -ForegroundColor Yellow
+            foreach ($e in $emb) {
+                Write-Host ('    0x{0:x8}  ' -f [long]$e.offset) -NoNewline -ForegroundColor DarkGray
+                Write-Host $e.name -ForegroundColor Yellow
+            }
+            Say 'внутри что-то спрятано — прогони этот же файл через модуль 2, он заглянет в архивы.'
         }
-        Say 'внутри что-то спрятано. вырезать: python -c "d=open(''файл'',''rb'').read(); open(''out'',''wb'').write(d[СМЕЩЕНИЕ:])"'
+        $strs = @($r.strings)
+        if ($strs.Count) {
+            Write-Host ''
+            Write-Host '  строки:' -ForegroundColor DarkGray
+            foreach ($t in $strs) { Write-Host ('    ' + $t) -ForegroundColor DarkGreen }
+        }
+        $flags = @($r.flags)
+        if ($flags.Count) { Flag-Box $flags[0] }
+        elseif (-not $emb.Count) { Say 'флага в строках нет. высокая энтропия — копай блобы через декодер.' }
+        Say 'следующий файл — или пустой Enter, чтобы выйти.'
     }
-    $strs = @($r.strings)
-    if ($strs.Count) {
-        Write-Host ''
-        Write-Host '  строки:' -ForegroundColor DarkGray
-        foreach ($s in $strs) { Write-Host ('    ' + $s) -ForegroundColor DarkGreen }
-    }
-    $flags = @($r.flags)
-    if ($flags.Count) { Flag-Box $flags[0] }
-    elseif (-not $emb.Count) { Say 'флага в строках нет. высокая энтропия — копай блобы через декодер.' }
 }
 
 function Module-Templates {
@@ -871,21 +920,25 @@ function Module-Templates {
     $r = Invoke-Engine @('templates') 'загружаю шаблоны' 300
     if ($r.error) { Boot-Line $r.error 'FAIL'; return }
     $list = @($r.templates)
-    Write-Host ''
-    for ($i = 0; $i -lt $list.Count; $i++) {
-        Write-Host ("  [{0}] " -f ($i + 1)) -NoNewline -ForegroundColor Green
-        Write-Host ('{0,-16}' -f $list[$i].file) -NoNewline -ForegroundColor White
-        Write-Host $list[$i].about -ForegroundColor DarkGray
+    Hint @('введи номер шаблона — сохраню его в helper\scripts и открою папку')
+    while ($true) {
+        Write-Host ''
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            Write-Host ("  [{0}] " -f ($i + 1)) -NoNewline -ForegroundColor Green
+            Write-Host ('{0,-16}' -f $list[$i].file) -NoNewline -ForegroundColor White
+            Write-Host $list[$i].about -ForegroundColor DarkGray
+        }
+        $sel = Prompt-Line 'номер'
+        if ([string]::IsNullOrWhiteSpace($sel)) { Say 'выхожу в меню.'; return }
+        if (-not ($sel -match '^\d+$') -or [int]$sel -lt 1 -or [int]$sel -gt $list.Count) { Boot-Line 'нет такого номера' 'FAIL'; continue }
+        $dir = Join-Path $PSScriptRoot 'scripts'
+        $res = Invoke-Engine @('template', $list[[int]$sel - 1].key, $dir) 'сохраняю' 300
+        if ($res.error) { Boot-Line $res.error 'FAIL'; continue }
+        if ($script:SndOn -and $script:ChimeBytes) { Play-Bytes $script:ChimeBytes }
+        Boot-Line ("сохранено: " + $res.saved) 'OK'
+        Say 'открываю папку. подставь свои значения и запускай: py имя_скрипта.py'
+        try { Invoke-Item $dir } catch {}
     }
-    $sel = Prompt-Line 'номер'
-    if (-not ($sel -match '^\d+$') -or [int]$sel -lt 1 -or [int]$sel -gt $list.Count) { return }
-    $dir = Join-Path $PSScriptRoot 'scripts'
-    $res = Invoke-Engine @('template', $list[[int]$sel - 1].key, $dir) 'сохраняю' 300
-    if ($res.error) { Boot-Line $res.error 'FAIL'; return }
-    if ($script:SndOn -and $script:ChimeBytes) { Play-Bytes $script:ChimeBytes }
-    Boot-Line ("сохранено: " + $res.saved) 'OK'
-    Say 'открываю папку. подставь свои значения и запускай: py имя_скрипта.py'
-    try { Invoke-Item $dir } catch {}
 }
 
 $Menu = @(

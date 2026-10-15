@@ -154,40 +154,46 @@ def xor_known(b):
             break
     return None
 
-def magic(data, depth=4):
-    """рекурсивно разворачивает слои; возвращает список (recipe, result) с найденным флагом,
-       иначе лучший «читаемый» результат."""
-    best = []
-    seen = set()
-    found = []
+INVERSE_SELF = {"rot13", "reverse"}   # применить дважды подряд = ничего не сделать
+
+def _magic_once(data, depth):
+    best, seen, found = [], set(), []
 
     def rec(b, recipe, d):
         if len(found) >= 6 or d < 0: return
-        h = (bytes(b[:64]), len(b))
+        h = (bytes(b[:64]), len(b), d)
         if h in seen: return
         seen.add(h)
         fl = flag_in(b)
         if fl:
             found.append((" > ".join(recipe) if recipe else "как есть", fl, b))
             return
-        # XOR-попытки на каждом слое
         hit_here = False
         for name, res in filter(None, [xor_known(b), xor_single(b)]):
             fl2 = flag_exact(res)
             if fl2:
                 found.append((" > ".join(recipe + [name]), fl2, res)); hit_here = True
-        if hit_here: return          # слой раскрылся в флаг — глубже не копаем
-        if d == 0: return
+        if hit_here or d == 0: return
         for name, fn in SINGLE:
+            if recipe and name == recipe[-1] and name in INVERSE_SELF: continue
             try: out = fn(b)
             except Exception: out = None
             if not out or out == b: continue
-            # запоминаем читаемые ветки на случай, если флаг не найдём
             if looks_text(out): best.append((" > ".join(recipe + [name]), out))
             rec(out, recipe + [name], d - 1)
 
     rec(data, [], depth)
     return found, best
+
+def magic(data, depth=4):
+    """ищет флаг с постепенным углублением — так рецепт получается самым коротким"""
+    best_all = []
+    for d in range(depth + 1):
+        found, best = _magic_once(data, d)
+        if found:
+            return found, best
+        best_all = best
+    return [], best_all
 
 
 def iter_strings(b, minlen=4):
@@ -249,7 +255,8 @@ def hunt_bytes(b, src, hits, _depth=0):
             for c in cands:
                 if c in seen: continue
                 seen.add(c)
-                found, _ = magic(c, depth=4)
+                found, _ = _magic_once(c, 4)          # быстрый проход
+                if found: found, _ = magic(c, depth=4)  # для находки — кратчайший рецепт
                 for recipe, fl, _ in found[:1]:
                     hits.append((src, "блоб", recipe, fl))
     # 3) распаковка: gzip/zlib целиком и заход внутрь архивов (zip/tar)
@@ -362,6 +369,11 @@ def cmd_decode(path):
     except Exception:
         data = raw.strip()
     found, best = magic(data, depth=5)
+    if not found and len(data) > 24:
+        hits = []
+        hunt_bytes(data, "ввод", hits)
+        for _, kind, recipe, fl in hits:
+            found.append((recipe if recipe else "как есть", fl, b""))
     res = {"found": [], "readable": []}
     seen = set()
     for recipe, fl, _ in found:
@@ -394,7 +406,10 @@ def cmd_hunt(path):
             continue
         rel = os.path.relpath(f, base)
         hunt_bytes(b, rel, hits)   # распаковка архивов/gzip — внутри hunt_bytes
-    uniq = list(dict.fromkeys(hits))
+    _seen = set(); uniq = []
+    for h in hits:
+        if (h[0], h[3]) in _seen: continue
+        _seen.add((h[0], h[3])); uniq.append(h)
     out({"files": len(files), "hits": [
         {"src": s, "kind": k, "recipe": r.split(" > ") if r and r != "как есть" else [], "flag": fl}
         for s, k, r, fl in uniq[:60]]})
