@@ -288,66 +288,138 @@ EMBED = [(b"PK\x03\x04", "ZIP"), (b"\x89PNG\r\n", "PNG"), (b"\xff\xd8\xff", "JPE
 
 
 TEMPLATES = {
-"ppc": ("ppc_spam.py", r'''# PPC: массовая отправка запросов (как Homyak Tap).
-# Подставь URL, куки и тело запроса из DevTools -> Network.
+"ppc": ("ppc_spam.py", r'''# PPC: автоматизируем клики/запросы к серверу задания (как Homyak Tap)
+#
+# Когда нужно: в задании просят сделать что-то много раз (накликать N раз,
+# набрать баланс и т.п.). Руками нереально — автоматизируем запрос, который
+# шлёт браузер при одном клике.
+#
+# Как узнать, что подставлять:
+#   1. Открой задание, нажми F12 -> вкладка Network.
+#   2. Сделай одно действие (клик) на странице.
+#   3. Найди появившийся запрос, посмотри:
+#        - его URL            -> в URL ниже
+#        - метод (GET/POST)
+#        - тело (вкладка Payload / Request)   -> в payload
+#        - свои cookie (вкладка Headers)      -> в COOKIES
+#   4. Правый клик по запросу -> Copy -> Copy as cURL тоже помогает всё увидеть.
+#
+# Запуск: py ppc_spam.py    (нужен пакет requests из набора WEB)
 import requests, json, random, time
 
-URL = "https://TARGET/api/tap"
-COOKIES = {"homyak": "ВСТАВЬ_КУКУ"}
+URL = "https://TARGET/api/tap"          # <- URL запроса из Network
+COOKIES = {"homyak": "ВСТАВЬ_КУКУ"}      # <- свои cookie (F12 -> Application -> Cookies)
 
 def tap():
+    # тело запроса. у Homyak Tap это были координаты клика — подставь своё
     payload = {"x": random.randint(600, 900), "y": random.randint(600, 900)}
     r = requests.post(URL, data=json.dumps(payload), cookies=COOKIES,
                       headers={"Content-Type": "application/json"})
     return r
 
+# сколько раз повторить. у Homyak Tap нужно было 8888 — ставь с запасом
 for i in range(10000):
     tap()
-    if i % 500 == 0: print("sent", i)
-    # time.sleep(0.01)  # если сервер злится на частоту
+    if i % 500 == 0:
+        print("отправлено:", i)
+    # time.sleep(0.02)   # раскомментируй, если сервер ругается на частоту
+                         # (важно: не заваливаем чужие сервисы, только своё задание)
+
+# когда счётчик набран — флаг обычно по кнопке Flag на самой странице
 '''),
-"z3": ("solve_z3.py", r'''# REVERSE: восстановить флаг по проверке через SMT-солвер (как Rusty love).
-# Опиши в решателе те же ограничения и формулу, что в бинарнике.
+"z3": ("solve_z3.py", r'''# REVERSE: восстанавливаем флаг по проверке в бинарнике через z3 (как Rusty love)
+#
+# Когда нужно: программа принимает флаг на вход и говорит верно/неверно.
+# Внутри она как-то считает контрольную сумму и сравнивает с числом.
+# Перебирать нереально, поэтому описываем ту же формулу в z3, а он сам
+# находит вход, при котором всё сходится.
+#
+# Порядок работы:
+#   1. В IDA/Ghidra находишь функцию проверки (ищи строку "wrong"/"неверно",
+#      потом по ссылкам — в main).
+#   2. Смотришь: какой алфавит разрешён, какая длина, как считается сумма,
+#      с каким числом сравнивается.
+#   3. Переносишь это сюда (блок ниже) и запускаешь: py solve_z3.py
+#
+# Нужен пакет z3-solver из набора CRYPTO.
 from z3 import *
 
-N = 10                       # длина искомой части
+N = 10                       # длина искомой части флага (без обёртки SOLARCTF{})
 chars = [BitVec(f"c{i}", 8) for i in range(N)]
 s = Solver()
-for c in chars:              # алфавит: цифры и заглавные
+
+# алфавит символов. здесь: цифры 0-9 и заглавные A-Z. поправь под свой бинарник
+for c in chars:
     s.add(Or(And(c >= ord('0'), c <= ord('9')),
              And(c >= ord('A'), c <= ord('Z'))))
 
-# --- сюда перенеси вычисление контрольной суммы из дизассемблера ---
+# --- СЮДА переносишь вычисление контрольной суммы из дизассемблера ---
+# это просто пример (сумма по основанию 36). замени на реальную формулу
 val = BitVecVal(0, 64)
 for i, c in enumerate(chars):
     val = (val * 36 + ZeroExt(56, c)) & 0xFFFFFFFFFFFFFFFF
-s.add(val == 0xDEADBEEF)     # <- целевое значение из бинарника
 
-print("sat" if s.check() == sat else "unsat")
+s.add(val == 0xDEADBEEF)     # <- целевое число из бинарника (с чем сравнивают)
+# --------------------------------------------------------------------
+
 if s.check() == sat:
     m = s.model()
-    print("".join(chr(m[c].as_long()) for c in chars))
+    print("нашёл:", "".join(chr(m[c].as_long()) for c in chars))
+else:
+    print("unsat — проверь ограничения и формулу, что-то не сходится")
 '''),
-"xor": ("xor_crack.py", r'''# CRYPTO: XOR с ключом, вычисленным по известному началу флага.
-PREFIX = b"SOLARCTF{"
-data = bytes.fromhex("ВСТАВЬ_HEX")   # или open("file","rb").read()
+"xor": ("xor_crack.py", r'''# CRYPTO: ломаем XOR, вычислив ключ по известному началу флага
+#
+# Главная идея XOR: если знаешь, что открытый текст начинается с "SOLARCTF{",
+# то ключ = (зашифрованные байты) XOR ("SOLARCTF{"). Ключ обычно короткий и
+# повторяется по кругу, поэтому дальше просто применяем его ко всему.
+#
+# Когда нужно: данные шифрованы XOR, а ключ ты не знаешь (или знаешь — тогда
+# подставь его в k напрямую и пропусти перебор).
+#
+# Запуск: py xor_crack.py
+PREFIX = b"SOLARCTF{"                   # известное начало флага
+data = bytes.fromhex("ВСТАВЬ_HEX")      # зашифрованные байты (hex)
+# data = open("secret.bin", "rb").read()  # или прямо из файла
 
-key = bytes(data[i] ^ PREFIX[i] for i in range(len(PREFIX)))  # период <= len(PREFIX)
+# считаем ключ по префиксу и пробуем все длины периода
+key = bytes(data[i] ^ PREFIX[i] for i in range(len(PREFIX)))
 for klen in range(1, len(PREFIX) + 1):
     k = key[:klen]
     out = bytes(data[i] ^ k[i % klen] for i in range(len(data)))
+    # если расшифровка похожа на флаг (печатная и есть закрывающая скобка) — показываем
     if b"}" in out and all(32 <= x < 127 for x in out[:40]):
-        print(klen, k, out[:80]); break
+        print("длина ключа:", klen, "| ключ:", k)
+        print("результат:", out[:120])
+        break
+else:
+    print("не сошлось. возможно ключ длиннее префикса — впиши его в k вручную")
 '''),
-"req": ("http_probe.py", r'''# WEB: быстрый перебор/прощупывание эндпоинтов.
+"req": ("http_probe.py", r'''# WEB: быстро прощупываем сайт — какие страницы и файлы вообще есть
+#
+# Когда нужно: на старте веб-задания, чтобы найти спрятанные страницы
+# (/admin, забытый /.git, бэкапы, отладочные ручки). Что ответило не 404 —
+# туда и копаем.
+#
+# Важно: гоняем ТОЛЬКО сервер своего задания, список держим маленьким,
+# чужие сайты не трогаем.
+#
+# Запуск: py http_probe.py   (нужен пакет requests из набора WEB)
 import requests
-BASE = "https://TARGET"
-for p in ["/admin", "/api", "/.git/config", "/robots.txt", "/flag", "/debug"]:
+
+BASE = "https://TARGET"                 # <- адрес задания
+
+# частые интересные пути. дополняй под конкретную задачу
+paths = ["/admin", "/api", "/.git/config", "/robots.txt",
+         "/flag", "/flag.txt", "/debug", "/backup", "/.env", "/sitemap.xml"]
+
+for p in paths:
     try:
         r = requests.get(BASE + p, timeout=5)
+        # код ответа, размер, путь. 200/301/302/403 — повод посмотреть глазами
         print(r.status_code, len(r.content), p)
     except Exception as e:
-        print("err", p, e)
+        print("ошибка", p, e)
 '''),
 }
 
